@@ -39,7 +39,7 @@ def load_vctk_audio(directory, sample_rate):
         yield audio, speaker_id
 
 
-def trim_silence(audio, threshold=0.3):
+def trim_silence(audio, threshold):
     '''Removes silence at the beginning and end of a sample.'''
     energy = librosa.feature.rmse(audio)
     frames = np.nonzero(energy > threshold)
@@ -58,7 +58,7 @@ class AudioReader(object):
                  coord,
                  sample_rate,
                  sample_size=None,
-                 silence_threshold=0.3,
+                 silence_threshold=None,
                  queue_size=256):
         self.audio_dir = audio_dir
         self.sample_rate = sample_rate
@@ -72,6 +72,12 @@ class AudioReader(object):
                                          shapes=[(None, 1)])
         self.enqueue = self.queue.enqueue([self.sample_placeholder])
 
+        # TODO Find a better way to check this.
+        # Checking inside the AudioReader's thread makes it hard to terminate
+        # the execution of the script, so we do it in the constructor for now.
+        if not find_files(audio_dir):
+            raise ValueError("No audio files found in '{}'.".format(audio_dir))
+
     def dequeue(self, num_elements):
         output = self.queue.dequeue_many(num_elements)
         return output
@@ -84,16 +90,17 @@ class AudioReader(object):
             iterator = load_generic_audio(self.audio_dir, self.sample_rate)
             for audio, filename in iterator:
                 if self.coord.should_stop():
-                    self.stop_threads()
                     stop = True
                     break
-                # Remove silence
-                audio = trim_silence(audio[:, 0], self.silence_threshold)
-                if audio.size == 0:
-                    print("Warning: {} was ignored as it contains only "
-                          "silence. Consider decreasing trim_silence "
-                          "threshold, or adjust volume of the audio."
-                          .format(filename))
+                if self.silence_threshold is not None:
+                    # Remove silence
+                    audio = trim_silence(audio[:, 0], self.silence_threshold)
+                    audio = audio.reshape(-1, 1)
+                    if audio.size == 0:
+                        print("Warning: {} was ignored as it contains only "
+                              "silence. Consider decreasing trim_silence "
+                              "threshold, or adjust volume of the audio."
+                              .format(filename))
 
                 if self.sample_size:
                     # Cut samples into fixed size pieces
@@ -106,10 +113,6 @@ class AudioReader(object):
                 else:
                     sess.run(self.enqueue,
                              feed_dict={self.sample_placeholder: audio})
-
-    def stop_threads():
-        for t in self.threads:
-            t.stop()
 
     def start_threads(self, sess, n_threads=1):
         for _ in range(n_threads):
